@@ -526,6 +526,318 @@ function preg_quote(str, delimiter) {
       updateNesting(line);
     };
   };
+  
+ /**
+   * JS-like language line parser
+   * Handles Tcl. Was originally a copy of LineParserJS
+   * @param {string} lang detected language name
+   * @param {array} classes string class definitions
+   * @param {array} functions string function definitions
+   * @param {string} id identifier definition RE
+   * @param {array} lc line comment delimiters array
+   * @param {array} bc block comment delimiters array
+   */
+  LineParserTcl = function(lang, classes, functions, id, lc, bc) {
+    /// Defaults for JavaScript
+    if (typeof(id) == 'undefined') id = '[a-zA-Z_$][.a-zA-Z0-9_$]*';
+    /// Private variables
+    var self = this, // this access for private functions
+        pp = new Preprocessor(id, lc, bc, lang != 'CSS'), // preprocessor for literals and comments
+        i, m; // index, matches
+    /// Regular expressions
+    var _classes = [], // class matching RE array
+        _functions = [], // function matching RE array
+        _jQuery_match = /^\s*\$\.|^\s*jQuery\./g; // jQuery matching RE
+    /// Public properties
+    this.index = -1;
+    this.text = null; // node text
+    this.type = TYPE_UNKNOWN; // node type
+    this.open = true; // if the node is open container for other nodes
+    this.level = 0; // code nesting level
+    this.nextLevelOffset = 0; // next level offset for \n before brace syntax
+    this.nodeLevels = []; // nesting levels for nodes
+    this.braceRequired = false; // if opening brace is required to accept node
+    this.removeLast = false; // if last node didn't match the brace required
+    this.blockComment = false; // block comment mode
+    /**
+     * Parses class or function definition
+     * @param {string} definition
+     * @returns {RegExp}
+     */
+    var _parseDefinition = function(definition) {
+      return new RegExp('^\\s*' +
+        definition
+          .replace(/\./g, '\\.')
+          .replace(/\*/g, '.*?')
+          .replace(/ : /g, '\\s*\\:\\s*')
+          .replace(/:type/, '(?:\\s*:\\s*[a-zA-Z\\*]+\\s*)?')
+          .replace(/ \}/g, '\\}')
+          .replace(/ \{$/g, '(?:\\s*\\{\\s*$|\s*$|\\s*\\{.*?\\}\\s*[,;]?\\s*$)')
+          .replace(/ = /g, '\\s*\\=\\s*')
+          .replace(/ +/g, '\\s+')
+          .replace(/id/g, id)
+          .replace(/_name_/g, '(' + id + ')')
+          //.replace(/\,$/, '\\s*[,{]\\s*$')
+          .replace(/\,$/, '(?:\\s*[,{]\\s*$|\\s*$)') // fixed for CSS
+          .replace(/\(\)/g, '\\s*(\\([^}{;]*\\))\\s*'));
+    };
+    /**
+     * Line parser initialization
+     */
+    var _init = function() {
+      /// class definition REs:
+      if (classes && classes.length)
+        for (i in classes) _classes.push(_parseDefinition(classes[i]));
+      /// function definition REs:
+      if (functions && functions.length)
+        for (i in functions) _functions.push(_parseDefinition(functions[i]));
+    }(); // auto started here
+    /**
+     * Nesting analyzer, TIME CRITICAL
+     * @param {string} line
+     * @param {boolean} matched
+     * @returns {number}
+     */
+    var updateNesting = function(line) {
+      var o, p, lc = 0;
+      for (p in line) {
+        if (line.charAt(p) == '{') lc++; else
+        if (line.charAt(p) == '}') lc--;
+      }
+      if (self.nextLevelOffset) {
+        lc+= self.nextLevelOffset;
+        self.nextLevelOffset = 0;
+      }
+      self.level+= lc;
+      if (self.text) {
+        self.nodeLevels.push(self.level);
+        if (lc < 1) { // no level increase?
+          if (line.indexOf('}') >= 0 || line.match(/,$/)) { // closed in the same line or block def?
+            o = line.match(/\{(.*?)\}/); // one liners...
+            if (o && !o[1] && !self.text.match(/[^a-zA-Z0-9_]/)) { // empty?
+              self.nodeLevels.pop();
+              self.text = null; // skip small empty nodes with common names
+            } else {
+              self.nodeLevels.pop();
+              self.open = false;
+            }
+            return;
+          } else { // no opening brace then
+            if (lang != 'Perl' && !line.match(/\s*:\s*XML\s*[:=]\s*$/)) self.braceRequired = true;
+            self.level++; // bump level anyway
+            self.nodeLevels[self.nodeLevels.length - 1] = self.level;
+            if (lang != 'Perl' || !line.match(/;\s*$/))
+              self.nextLevelOffset = -1;
+          }
+        }
+      }
+      self.open = self.level >= self.nodeLevels.slice(-1)[0];
+      if (!self.open) self.nodeLevels.pop();
+    };
+    /**
+     * Resets line parser (call before each line)
+     */
+    var reset = function() {
+      self.text = null;
+      self.open= true;
+    };
+    /**
+     * Single line parsing code, TIME CRITICAL
+     * @param {string} line
+     */
+    this.parse = function(line, index) {
+      reset();
+      line = pp.parse(line, index); // code filtered, definition blocks matched
+      if (!line) return;
+      this.index = pp.defBlockReady ? (1 * pp.defBlockStart) : (1 * index);
+      this.removeLast = this.braceRequired &&
+                        line.replace(/\s+/, '').length &&
+                        !line.match(/^\s*\{\s*$/);
+      this.braceRequired = false;
+      var ln; // literals index
+      ///
+      /// Matching classes
+      ///
+      if (_classes.length) for (i in _classes)
+        if ((m = _classes[i].exec(line)) && m[1]) {
+        this.text = m[1];
+        if (pp.literals) for (ln in pp.literals) // literals restore
+          this.text = this.text.replace(/['"\/]\.\.\.['"\/]/, pp.literals[ln]);
+        if (lang == 'CSS') this.type = TYPE_AT_RULE;
+        else {
+          this.type = TYPE_CLASS;
+            if (lang == 'Tcl' && line.match(/namespace eval/)) {
+              this.type = TYPE_PROTOTYPE_CLASS;
+            }
+          if (lang == 'JavaScript') {
+            if (line.match(_jQuery_match)) {
+              this.text = this.text.replace(_jQuery_match, '');
+              this.type = TYPE_JQUERY_EXT;
+            }
+            else
+            if (line.match(/\bprototype\b/)) this.type = TYPE_PROTOTYPE_CLASS;
+          }
+        }
+        break;
+      }
+      /// Matching functions
+      if (!this.text && // class is not matched
+          _functions.length) // not inside started definition block
+            for (i in _functions) // match must be done against all definitions
+              if ((m = _functions[i].exec(line)) && m[1]) { // if matched:
+        this.text = m[1].replace('this.', '');
+        if (m[2]) { // default values will be removed:
+          if (lang != 'CSS') m[2] = m[2].replace(/\s*=[^,)]*([,)])/g, '$1');
+          this.text+= m[2];
+        }
+        if (pp.literals) for (ln in pp.literals) // literals restore
+          this.text = this.text.replace(/['"\/]\.\.\.['"\/]/, pp.literals[ln]);
+        if (lang == 'CSS') this.type = TYPE_STYLE;
+        else {
+          /// implicit access definitions
+          this.type = TYPE_FUNCTION;
+          if (lang == 'Tcl' && line.match(/typemethod/)) {
+               this.type=TYPE_PUBLIC_STATIC;
+          }
+          
+          if (line.match(/^\s*var\s+/)) this.type = TYPE_PRIVATE; else
+          if (line.match(/^\s*this\.|:\s*function/)) this.type = TYPE_PUBLIC; else
+          if (line.match(/^\s*[^.]+\..*=\s*function/)) this.type = TYPE_PUBLIC_STATIC;
+          /// explicit access definitions
+          if (line.match(/\bstatic\s+/)) {
+            if (line.match(/^\s*private\s+/)) this.type = TYPE_PRIVATE_STATIC; else
+            if (line.match(/^\s*protected\s+/)) this.type = TYPE_PROTECTED_STATIC; else
+            this.type = TYPE_PUBLIC_STATIC;
+          } else {
+            if (line.match(/^\s*private\s+/)) this.type = TYPE_PRIVATE; else
+            if (line.match(/^\s*protected\s+/)) this.type = TYPE_PROTECTED; else
+            if (line.match(/^\s*public\s+/)) this.type = TYPE_PUBLIC;
+          }
+          if (lang == 'JavaScript') {
+            if (line.match(_jQuery_match)) {
+              this.text = this.text.replace(_jQuery_match, '');
+              this.type = TYPE_JQUERY_EXT;
+            } else
+            if ((m = line.match(/([_$a-zA-Z][_$a-zA-Z0-9]*)\.prototype\b/))) {
+              this.text = m[1] + '.prototype.' + this.text;
+              this.type = TYPE_PROTOTYPE;
+            }
+          }
+        }
+        break;
+      }
+      updateNesting(line);
+    };
+  };
+  /**
+   * Tag parser for XML, XUL, XHTML and HTML
+   * @param {string} lang detected language name
+   */
+  LineParserXML = function(lang) {
+    /// Private properties
+    var i, m, n, t, a, // index, matches, node, tag, attributes array
+        _tag = /<([a-ż_][a-ż_0-9:]*(?:\s+[a-ż_][a-ż_0-9:]*\s*=\s*['"].*?['"])*)|(>)|(\/>)|(<\/[a-z][a-z0-9:]*\s*>)|(<!--)|(-->)/ig, // tag matching regex
+        //_tag = /<([a-ż_][a-ż_0-9:]*)|(>)|(\/>)|(<\/[a-z][a-z0-9:]*\s*>)|(<!--)|(-->)/ig, // tag matching regex
+        _empty = /\b(?:area|base|br|canvas|col|hr|img|input|link|meta|param)\b/i; // empty HTML tags
+    /// Public properties
+    this.nodes = []; // line nodes
+    this.open = null; // currently opened node (multi-line)
+    this.ignore = false; // set for comments
+    /**
+     * Single line parsing code, TIME CRITICAL
+     * @param {string} line
+     */
+    this.parse = function(line, index) {
+      this.nodes = [];
+      line = line.replace(/^\s+|\s+$/, '');
+      if (!line) return;
+      var self = this;
+      /**
+       * Parses HTML tag into CSS selector
+       * @param {string} tag HTML tag content
+       * @returns {string} selector
+       */
+      var parseTag = function(tag) {
+        var i, m, ts, as, n = [], v = [], a = {};
+        m = tag.match(/^(\S+)\s*(.*)$/);
+        ts = m[1]; as = m[2]; // tag string, attributes string
+        if ((m = as.match(/".*?"/g))) { // match values in ""
+          for (i in m) m[i] = m[i].replace(/^"|"$/g, '');
+          v = v.concat(m);
+        }
+        if ((m = as.match(/'.*?'/g))) { // match values in ''
+          for (i in m) m[i] = m[i].replace(/^'|'$/g, '');
+          v = v.concat(m);
+        }
+        n = as.replace(/".*?"/g, '')
+              .replace(/'.*?'/g, '')
+              .replace(/\s+/g, '')
+              .split('='); // match names
+        as = ''; // new selector attributes string
+        for (i in n) a[n[i]] = v[i]; // attributes object
+        if (a['id']) { // id part
+          as+= '#' + a['id'];
+          delete a['id'];
+        }
+        if (a['class']) { // class part
+          as+= '.' + a['class'].replace(/\s+/g, '.');
+          delete a['class'];
+        }
+        for (i in a)
+          if (i == 'name' || (ts == 'option' && i == 'value'))
+            as+= '[' + i + '="' + a[i] + '"]'; // name / value part
+        return ts + as;
+      };
+      /**
+       * Parses a HTML line containing multiple tags
+       * @param {object} self 'this' reference
+       */
+      var parseLine = function(self) {
+        while ((m = _tag.exec(line))) {
+          if (!self.ignore) {
+            n = {};
+            if (m[1]) { // tag opening
+              n.open = true;
+              if ((lang == 'HTML' || lang == 'HTML5') && m[1].match(_empty)) n.open = false;
+              n.text = parseTag(m[1]);
+              n.line = index * 1 + 1;
+              self.open = n;
+              // do we really need those huge attribute lists?
+              if (line.substr(-n.text.length) === n.text) n.text+= '...';
+            } else
+            if (m[2]) { // tag ending
+              if (!n.text && self.open) n = self.open;
+              if (n.text) {
+                if (!self.open) n.line = index * 1 + 1;
+                self.nodes.push(n);
+              }
+              self.open = null;
+            } else
+            if (m[3]) { // tag closing
+              if (!n.text && self.open) n = self.open;
+              n.open = false;
+              if (!self.open) n.line = index * 1 + 1;
+              self.nodes.push(n);
+              self.open = null;
+            } else
+            if (m[4]) { // closing tag
+              n = {};
+              n.open = false;
+              self.nodes.push(n);
+              self.open = null;
+            }
+            if (m[5]) { // comment start
+              self.ignore = true;
+            }
+          }
+          if (m[6]) { // comment end
+            self.ignore = false;
+          }
+        }
+      }(this);
+    };
+  };
+  
   /**
    * Tag parser for XML, XUL, XHTML and HTML
    * @param {string} lang detected language name
@@ -902,6 +1214,27 @@ function preg_quote(str, delimiter) {
                                   '*\\bsub name()'],
                                  '[&a-zA-Z_][a-zA-Z0-9_\\:]*',
                                  ['#']);
+            break;
+          case 'Tcl':
+            p = new LineParserTcl(self.lang,
+                                 ['itcl::class _name_',
+                                  'class _name_',
+                                  'snit::widget _name_',
+                                  'snit::widgetadapter _name_',
+                                  'snit::type _name_',
+                                  'namespace eval _name_',
+                                  'oo::class create _name_',
+                                  'oo::class define _name_',
+                                  'oo::objdefine _name_'
+                                 ],
+                                 ['*\\bproc _name_ ',
+                                  '*\\bmethod _name_ ',
+                                  '*\\btypemethod _name_ ',
+                                  'itcl::configbody _name_'
+                                ],
+                                 
+                                 '[&a-zA-Z_:][a-zA-Z0-9_\\:~\?]*',
+                                 [';#']);
             break;
           case 'Python':
             p = new LineParserPython();
