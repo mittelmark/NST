@@ -546,8 +546,7 @@ function preg_quote(str, delimiter) {
         i, m; // index, matches
     /// Regular expressions
     var _classes = [], // class matching RE array
-        _functions = [], // function matching RE array
-        _jQuery_match = /^\s*\$\.|^\s*jQuery\./g; // jQuery matching RE
+        _functions = []; // function matching RE array
     /// Public properties
     this.index = -1;
     this.text = null; // node text
@@ -663,21 +662,11 @@ function preg_quote(str, delimiter) {
         this.text = m[1];
         if (pp.literals) for (ln in pp.literals) // literals restore
           this.text = this.text.replace(/['"\/]\.\.\.['"\/]/, pp.literals[ln]);
-        if (lang == 'CSS') this.type = TYPE_AT_RULE;
-        else {
           this.type = TYPE_CLASS;
-            if (lang == 'Tcl' && line.match(/namespace eval/)) {
-              this.type = TYPE_PROTOTYPE_CLASS;
-            }
-          if (lang == 'JavaScript') {
-            if (line.match(_jQuery_match)) {
-              this.text = this.text.replace(_jQuery_match, '');
-              this.type = TYPE_JQUERY_EXT;
-            }
-            else
-            if (line.match(/\bprototype\b/)) this.type = TYPE_PROTOTYPE_CLASS;
+          if (lang == 'Tcl' && line.match(/namespace eval/)) {
+            this.type = TYPE_PROTOTYPE_CLASS;
           }
-        }
+          
         break;
       }
       /// Matching functions
